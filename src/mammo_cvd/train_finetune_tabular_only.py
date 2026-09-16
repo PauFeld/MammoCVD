@@ -5,10 +5,10 @@ runs while DINO pretraining occupies the GPU. This is the number the
 DINO-pretrained and no-pretraining image models both need to beat (or at
 least understand their relationship to) once fine-tuning runs.
 
-Architecture: TabularEncoder (missingness-aware, from mirai_survival.py)
-+ small MLP head -> single logit. Uses the expanded v2 tabular feature set
-(build_tabular_features_v2.py): labs, diabetes/hypertension flags,
-medication flags, smoking/alcohol, family history of CVD, age.
+Architecture: TabularEncoder (missingness-aware) + small MLP head -> single
+logit. Uses the expanded v2 tabular feature set (build_tabular_features_v2.py):
+labs, diabetes/hypertension flags, medication flags, smoking/alcohol, family
+history of CVD, age.
 """
 from __future__ import annotations
 
@@ -22,8 +22,6 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, Dataset
-
-from src.mammo_cvd.mirai_survival import TabularEncoder
 
 PROJECT_ROOT = Path(os.environ.get("MAMMOCVD_ROOT", "."))  # set to your repo checkout root
 OUT_DIR = PROJECT_ROOT / "outputs" / "mammo_cvd"
@@ -152,6 +150,31 @@ class TabularOnlyDataset(Dataset):
                 torch.tensor(mask, dtype=torch.float32),
                 torch.tensor(float(row["label_5yr"])),
                 row["empi"])
+
+
+class TabularEncoder(nn.Module):
+    """Per-feature: linear(value) if present, learned "missing" vector if
+    not. Sums the per-feature embeddings into one tabular representation."""
+
+    def __init__(self, n_features: int, d_feature: int = 32):
+        super().__init__()
+        self.n_features = n_features
+        self.d_feature = d_feature
+        self.value_proj = nn.ModuleList([nn.Linear(1, d_feature) for _ in range(n_features)])
+        self.missing_embed = nn.Parameter(torch.randn(n_features, d_feature) * 0.02)
+
+    def forward(self, values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """values: (B, F) z-scored, NaN-safe (garbage where mask=0).
+        mask: (B, F) 1=present, 0=missing. Returns (B, d_feature)."""
+        b, f = values.shape
+        out = torch.zeros(b, self.d_feature, device=values.device)
+        for i in range(f):
+            present = mask[:, i : i + 1]  # (B,1)
+            v = values[:, i : i + 1]
+            projected = self.value_proj[i](v)  # (B, d_feature)
+            missing = self.missing_embed[i].unsqueeze(0).expand(b, -1)
+            out = out + present * projected + (1 - present) * missing
+        return out
 
 
 class TabularOnlyClassifier(nn.Module):

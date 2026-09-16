@@ -1,9 +1,6 @@
-"""Dataset for the single-exam mammogram -> prevalent-CVD cohort
-(outputs/mammo_cvd/cohort.csv, built by build_cohort.py)."""
+"""DICOM loading / preprocessing for mammogram views, plus a placeholder
+Dataset (see ExamDataset below) -- fill in your own cohort_csv schema."""
 from __future__ import annotations
-
-import os
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -11,10 +8,8 @@ import pydicom
 import torch
 from torch.utils.data import Dataset
 
-from src.mammo_cvd.mirai_encoder import STANDARD_VIEWS
+STANDARD_VIEWS = ["L_CC", "L_MLO", "R_CC", "R_MLO"]
 
-PROJECT_ROOT = Path(os.environ.get("MAMMOCVD_ROOT", "."))  # set to your repo checkout root
-COHORT_CSV = PROJECT_ROOT / "outputs" / "mammo_cvd" / "cohort.csv"
 IMG_SIZE = 512
 # Mirai's own preprocessing resolution (Yala et al. 2021): (width, height).
 MIRAI_IMG_SIZE = (1664, 2048)
@@ -195,69 +190,53 @@ MLO_VIEWS = ["L_MLO", "R_MLO"]
 VIEW_TO_IDX = {v: i for i, v in enumerate(STANDARD_VIEWS)}
 
 
-class MammoCVDDataset(Dataset):
-    """Returns (views (V,1,H,W), mask (V,), view_idx (V,), label (scalar), empi).
+class ExamDataset(Dataset):
+    """PLACEHOLDER -- plug in your own cohort loading here. Expected to
+    return, per exam: (views (V,1,H,W) via load_mammo_view() above, mask
+    (V,) marking which views are present, view_idx (V,) into
+    VIEW_TO_IDX/STANDARD_VIEWS, label (scalar 5yr MACE outcome), patient id).
 
-    view_mode="all" -> up to 4 standard views (L_CC/L_MLO/R_CC/R_MLO), pooled
-    by MiraiExamEncoder's attention pooling.
-    view_mode="single_mlo" -> exactly 1 view (whichever MLO side is present;
-    L_MLO preferred, falls back to R_MLO), for a faster first-pass signal
-    check -- cuts DICOM decode 4x and makes the cross-view attention pooling
-    a no-op (V=1)."""
+    `cohort_csv` should have one row per patient/instance with columns
+    `path_L_MLO` / `path_R_MLO` (and `path_L_CC` / `path_R_CC` if using all
+    four standard views) pointing at real DICOM files, plus a label column.
+    `splits_csv` should have `empi, split` (train/val/test)."""
 
-    def __init__(self, split: str, size: int = IMG_SIZE, splits_csv: Path | None = None,
-                 view_mode: str = "all"):
+    def __init__(self, split: str, cohort_csv: str, size: int = IMG_SIZE,
+                 splits_csv: str | None = None, view_mode: str = "single_mlo"):
         assert view_mode in ("all", "single_mlo")
         self.view_mode = view_mode
         self.views_to_use = STANDARD_VIEWS if view_mode == "all" else MLO_VIEWS
+        self.size = size
 
-        df = pd.read_csv(COHORT_CSV, dtype={"empi": str, "bathuan_folder_id": str})
-        if view_mode == "single_mlo":
-            df = df[df["path_L_MLO"].notna() | df["path_R_MLO"].notna()].reset_index(drop=True)
-        else:
-            df = df[df["n_views_available"] >= 1].reset_index(drop=True)
+        df = pd.read_csv(cohort_csv, dtype={"empi": str})
         if splits_csv is not None:
             splits = pd.read_csv(splits_csv, dtype={"empi": str})
             df = df.merge(splits[["empi", "split"]], on="empi", how="inner")
             df = df[df["split"] == split].reset_index(drop=True)
         self.df = df
-        self.size = size
 
     def __len__(self) -> int:
         return len(self.df)
 
-    def _get_single_mlo(self, row):
-        for v in MLO_VIEWS:
+    def __getitem__(self, idx: int):
+        row = self.df.iloc[idx]
+        imgs, mask, view_idx = [], [], []
+        for v in self.views_to_use:
             p = row.get(f"path_{v}")
             if isinstance(p, str) and p:
                 try:
-                    return [load_mammo_view(p, self.size, laterality=v[0])], [1.0], [VIEW_TO_IDX[v]]
-                except Exception:
+                    imgs.append(load_mammo_view(p, self.size, laterality=v[0]))
+                    mask.append(1.0)
+                    view_idx.append(VIEW_TO_IDX[v])
                     continue
-        return [np.zeros((self.size, self.size), dtype=np.float32)], [0.0], [VIEW_TO_IDX[MLO_VIEWS[0]]]
-
-    def __getitem__(self, idx: int):
-        row = self.df.iloc[idx]
-        if self.view_mode == "single_mlo":
-            imgs, mask, view_idx = self._get_single_mlo(row)
-        else:
-            imgs, mask, view_idx = [], [], []
-            for v in STANDARD_VIEWS:
-                p = row.get(f"path_{v}")
-                if isinstance(p, str) and p:
-                    try:
-                        imgs.append(load_mammo_view(p, self.size, laterality=v[0]))
-                        mask.append(1.0)
-                        view_idx.append(VIEW_TO_IDX[v])
-                        continue
-                    except Exception:
-                        pass
-                imgs.append(np.zeros((self.size, self.size), dtype=np.float32))
-                mask.append(0.0)
-                view_idx.append(VIEW_TO_IDX[v])
+                except Exception:
+                    pass
+            imgs.append(np.zeros((self.size, self.size), dtype=np.float32))
+            mask.append(0.0)
+            view_idx.append(VIEW_TO_IDX[v])
 
         views = torch.from_numpy(np.stack(imgs)).unsqueeze(1)  # (V, 1, H, W)
         mask = torch.tensor(mask, dtype=torch.float32)  # (V,)
         view_idx = torch.tensor(view_idx, dtype=torch.long)
-        label = torch.tensor(float(row["cvd_label"]))
+        label = torch.tensor(float(row["label_5yr"]))
         return views, mask, view_idx, label, row["empi"]

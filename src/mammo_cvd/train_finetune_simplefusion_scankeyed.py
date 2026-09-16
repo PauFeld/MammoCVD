@@ -30,7 +30,7 @@ import torch.nn as nn
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, Dataset
 
-from src.mammo_cvd.mirai_encoder import STANDARD_VIEWS
+from src.mammo_cvd.dataset import STANDARD_VIEWS
 
 PROJECT_ROOT = Path(os.environ.get("MAMMOCVD_ROOT", "."))  # set to your repo checkout root
 OUT_DIR = PROJECT_ROOT / "outputs" / "mammo_cvd"

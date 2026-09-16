@@ -1,17 +1,16 @@
-# mammocvd
+# Mammography Foundation Models for Opportunistic Prediction of Major Adverse Cardiovascular Events
 
 <p align="center">
   <img src="docs/fig1_method.png" alt="Method: frozen mammography foundation model encodes L-MLO/R-MLO views, embeddings are pooled into an exam representation, and an MLP head predicts 5-year MACE risk; Grad-CAM shown per view." width="720">
 </p>
 
-Code accompanying **"Mammography Foundation Models for Opportunistic Prediction of
-Major Adverse Cardiovascular Events."**
+
 Paula Feldman, Nusrat Binta Nizam, Sunwoo Kwak, Batuhan Karaman, Katerina Dodelzon,
 Mert Sabuncu — Weill Cornell Medicine / Cornell Tech. **Preprint:** arXiv link TBD.
 
 ## Summary
 
-We reuse **frozen mammography foundation models** (Mammo-CLIP, Mammo-FM) —
+We train a MLP on **frozen mammography foundation models** (Mammo-CLIP, Mammo-FM) —
 pretrained only for breast-cancer tasks, no cardiovascular supervision — to predict
 5-year MACE directly from raw screening mammograms. No calcification segmentation
 or BAC annotation is needed anywhere in the pipeline: the exam-level embedding
@@ -33,44 +32,34 @@ future MACE events at 7.7% precision (~3.4-fold enrichment over the base rate).
 
 ## Repository contents
 
-This repo ships the **modeling code** — embedding extraction, the four trained
-arms, and cross-arm statistical comparison — starting from an already-built cohort
-CSV. It does **not** include cohort construction / patient labeling, since that
-code runs directly against identifiable institutional EHR and DICOM data.
-
-**No patient data, split files, or model checkpoints are included or will be
-published.** See `dummy_data/` for a small synthetic dataset (public-domain
-mammogram images + invented labels) that smoke-tests every script here end-to-end.
+This repo ships the code at a high level: frozen-encoder wrappers,
+the MLP training arms, and cross-arm statistical comparison, not a runnable
+end-to-end pipeline. Cohort construction / patient labeling isn't included (that
+code runs directly against identifiable institutional EHR and DICOM data), and
+data loading is a **placeholder**: `ExamDataset` in `dataset.py` defines the
+expected interface but expects you to point `cohort_csv` at your own data.
 
 ```
 src/mammo_cvd/
-  dataset.py                                DICOM loading, breast-region auto-crop
-  mirai_encoder.py / mirai_survival.py      view-conditioning aggregator components
-  mammo_clip_features.py / mammo_fm_features.py   frozen EfficientNet-B5 encoders
+  dataset.py                                DICOM loading/preprocessing utilities +
+                                             ExamDataset (placeholder — plug in your data)
+  mammo_clip_features.py / mammo_fm_features.py   frozen EfficientNet-B5 encoder wrappers
+                                             (real, working — just need the public weights)
   extract_embeddings_scankeyed.py           precompute per-view embeddings
   train_finetune_simplefusion_scankeyed.py  mean-pool + MLP head trainer (image arms)
   train_finetune_tabular_only.py / train_age_only.py   baselines
   compare_arms.py                           bootstrap CIs + DeLong tests across arms
-
-dummy_data/
-  make_dummy_dataset.py   regenerates the synthetic smoke-test dataset
-  dummy_finetune_cohort.csv / dummy_tabular_features.csv / dummy_splits.csv
-  images/*.dcm             synthetic DICOMs from public-domain mammograms
 ```
 
-Expected cohort CSV schema (see `dummy_data/dummy_finetune_cohort.csv`): one row
-per instance — `empi, study_date, label_5yr, path_L_MLO, path_R_MLO,
-age_at_baseline` — plus a `splits.csv` (`empi, split`) and, for the tabular arm, a
-`tabular_features.csv` of per-patient risk factors.
+Expected cohort CSV schema: one row per instance — `patientID, study_date, label_5yr,
+path_L_MLO, path_R_MLO, age_at_baseline` — plus a `splits.csv` (`empi, split`) and,
+for the tabular arm, a `tabular_features.csv` of per-patient risk factors.
 
 ## Setup
 
 ```bash
 pip install torch pandas numpy scikit-learn matplotlib pillow pydicom requests
 ```
-
-Try it now with no real data: [`dummy_data/README.md`](dummy_data/README.md) runs
-the age-only and tabular baselines end-to-end in a couple of commands.
 
 All paths come from environment variables (nothing institutional is hardcoded):
 
