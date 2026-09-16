@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+outputs/
+*.csv
+!dummy_data/dummy_finetune_cohort.csv
+!dummy_data/dummy_tabular_features.csv
+!dummy_data/dummy_splits.csv
+*.pt
+*.tar
+.DS_Store

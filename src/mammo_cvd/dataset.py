@@ -1,0 +1,263 @@
+"""Dataset for the single-exam mammogram -> prevalent-CVD cohort
+(outputs/mammo_cvd/cohort.csv, built by build_cohort.py)."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pydicom
+import torch
+from torch.utils.data import Dataset
+
+from src.mammo_cvd.mirai_encoder import STANDARD_VIEWS
+
+PROJECT_ROOT = Path(os.environ.get("MAMMOCVD_ROOT", "."))  # set to your repo checkout root
+COHORT_CSV = PROJECT_ROOT / "outputs" / "mammo_cvd" / "cohort.csv"
+IMG_SIZE = 512
+# Mirai's own preprocessing resolution (Yala et al. 2021): (width, height).
+MIRAI_IMG_SIZE = (1664, 2048)
+# Same aspect ratio as MIRAI_IMG_SIZE (0.8125, matching our own native DICOMs'
+# ~3328x2560-4096x3328) but scaled down to ~the same pixel budget as the old
+# square IMG_SIZE=512 default -- isolates "does removing the square-resize's
+# aspect-ratio distortion help" from "does more resolution help", which a
+# jump straight to MIRAI_IMG_SIZE would confound together.
+ASPECT_CORRECT_IMG_SIZE = (480, 608)
+# Mammo-CLIP's own fixed resolution (width, height) -- see mammo_clip_features.py's
+# IMG_SIZE_W/IMG_SIZE_H, extracted from their checkpoint's embedded config. Exposed
+# here too so our own from-scratch ResNet-18 MMCL variant can be trained at the SAME
+# resolution as the Mammo-CLIP-backbone MMCL variant, for a resolution-matched
+# backbone-only comparison instead of confounding architecture with image size.
+MAMMOCLIP_IMG_SIZE = (912, 1520)
+
+
+def _count_up_continuing_ones(b_arr: np.ndarray) -> np.ndarray:
+    """For a boolean array, returns for each position the length of the
+    longest run of True values it belongs to (or -1 if False). Used to find
+    the widest contiguous non-background stripe -- the breast tissue,
+    since scanner black-background is by far the most common single value
+    and thus the longest constant run, while burned-in text/markers are
+    small isolated blobs that don't form a wide contiguous run."""
+    n = len(b_arr)
+    left = np.arange(n)
+    left[b_arr > 0] = 0
+    left = np.maximum.accumulate(left)
+    rev = b_arr[::-1]
+    right = np.arange(n)
+    right[rev > 0] = 0
+    right = np.maximum.accumulate(right)
+    right = n - 1 - right[::-1]
+    return right - left - 1
+
+
+def _breast_region_indices(arr_255: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """arr_255 must already be normalized to 0-255 scale (bg_thresh=40 is
+    calibrated to that range). Returns (row_idx, col_idx) into arr_255
+    covering the widest contiguous non-background stripe in each axis --
+    the breast tissue silhouette."""
+    img = np.where(arr_255 <= 40.0, 0, arr_255)
+    height, _ = img.shape
+    y_a = height // 2 + int(height * 0.4)
+    y_b = height // 2 - int(height * 0.4)
+    col_is_tissue = img[y_b:y_a].std(axis=0) != 0
+    run_len = _count_up_continuing_ones(col_is_tissue)
+    col_idx = np.where(run_len == run_len.max())[0]
+
+    img_cols = arr_255[:, col_idx]
+    _, width = img_cols.shape
+    x_a = width // 2 + int(width * 0.4)
+    x_b = width // 2 - int(width * 0.4)
+    masked_cols = np.where(img_cols <= 40.0, 0, img_cols)
+    row_is_tissue = masked_cols[:, x_b:x_a].std(axis=1) != 0
+    run_len = _count_up_continuing_ones(row_is_tissue)
+    row_idx = np.where(run_len == run_len.max())[0]
+    return row_idx, col_idx
+
+
+def crop_breast_region(arr: np.ndarray) -> np.ndarray:
+    """Auto-crops to the breast tissue silhouette, discarding black
+    background -- and with it, any burned-in laterality/view marker text
+    (e.g. "L MLO"), which sits in the background corners, not on the
+    breast itself. Ports Mammo-CLIP's own preprocessing algorithm
+    (external/Mammo-CLIP/src/preprocessing/preprocess_image_to_png_kaggle.py,
+    np_ExtractBreast) rather than inventing a different heuristic, so our
+    reproduction of their pipeline actually matches it -- their bg_thresh=40
+    is calibrated to a 0-255 scale, so `arr` is normalized to that range
+    internally to compute the crop indices, then those indices are applied
+    to the ORIGINAL (real-intensity) array so downstream percentile-clip
+    normalization still sees true DICOM intensities, not a lossy 0-255
+    intermediate.
+
+    Real bug this fixes: confirmed via Grad-CAM saliency maps that both our
+    from-scratch and Mammo-CLIP-based models sometimes fixate on the
+    corner marker text instead of breast tissue -- a shortcut-learning
+    artifact from feeding the model the FULL uncropped image, marker
+    included."""
+    arr_min, arr_max = arr.min(), arr.max()
+    arr_255 = (arr - arr_min) / max(arr_max - arr_min, 1e-6) * 255.0
+    row_idx, col_idx = _breast_region_indices(arr_255)
+    cropped = arr[row_idx][:, col_idx]
+    # degenerate fallback (near-uniform image, e.g. a corrupted/blank DICOM)
+    if cropped.size == 0:
+        return arr
+    return cropped
+
+
+def _letterbox_pad(arr: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+    """Pads arr (H,W) with zeros, centered, so its aspect ratio matches
+    target_w/target_h -- WITHOUT stretching/distorting content. Needed
+    because crop_breast_region's output aspect ratio varies per patient
+    (breast shape/positioning differs), unlike the uncropped DICOM's
+    consistent ~0.77-0.81 ratio -- a plain resize straight to a fixed
+    target size after cropping would apply a different, unpredictable
+    stretch factor to every patient (confirmed: cropped ratios ranged
+    0.37-0.66 across a 6-patient sample, vs. ~0.77-0.81 uncropped)."""
+    h, w = arr.shape
+    target_ratio = target_w / target_h
+    cur_ratio = w / h
+    if cur_ratio < target_ratio:
+        # too narrow for the target -- pad width
+        new_w = int(round(h * target_ratio))
+        pad_total = max(new_w - w, 0)
+        pad_l, pad_r = pad_total // 2, pad_total - pad_total // 2
+        return np.pad(arr, ((0, 0), (pad_l, pad_r)), mode="constant")
+    elif cur_ratio > target_ratio:
+        # too wide for the target -- pad height
+        new_h = int(round(w / target_ratio))
+        pad_total = max(new_h - h, 0)
+        pad_t, pad_b = pad_total // 2, pad_total - pad_total // 2
+        return np.pad(arr, ((pad_t, pad_b), (0, 0)), mode="constant")
+    return arr
+
+
+def load_mammo_view(path: str, size: int | tuple[int, int] = IMG_SIZE,
+                     laterality: str | None = None, crop_breast: bool = True,
+                     letterbox: bool = True) -> np.ndarray:
+    """laterality: "L" or "R" (or None to skip left-alignment). When given,
+    R-laterality images are flipped horizontally so breast tissue is always
+    positioned the same way across L and R views ("left-align for consistent
+    positioning", matching Mirai's preprocessing) -- otherwise the same
+    anatomical structures appear mirrored depending on which breast was
+    imaged, which is a spurious cue the encoder would otherwise have to
+    learn to ignore.
+
+    crop_breast=True (default, added 2026-08-21): auto-crops to the breast
+    silhouette BEFORE resizing, discarding black background and any
+    burned-in laterality/view marker text with it -- see crop_breast_region.
+    The crop's aspect ratio varies per patient (unlike the raw DICOM's
+    consistent ~0.77-0.81), so a zero-padded letterbox step restores a
+    fixed aspect ratio before the final resize -- without it, every
+    patient would get a different, unpredictable stretch distortion (a
+    real bug caught after the crop fix landed, not a hypothetical).
+    Only set False to reproduce old (pre-crop) cached results/checkpoints
+    for a controlled before/after comparison.
+
+    letterbox=True (default): pads to the target aspect ratio before
+    resizing (see _letterbox_pad) -- correct for every model WE train
+    end-to-end, since we control that distribution ourselves. Set False
+    only for load_mammo_clip_view's use: Mammo-CLIP's own published
+    preprocessing crops then stretches directly to their fixed size with
+    no letterbox step (checked their code) -- their frozen pretrained
+    backbone's weights were calibrated to that stretched distribution, so
+    "fixing" the distortion for that specific arm would itself be a
+    train/inference preprocessing mismatch, not an improvement."""
+    ds = pydicom.dcmread(path)
+    arr = ds.pixel_array.astype(np.float32)
+    if getattr(ds, "PhotometricInterpretation", "") == "MONOCHROME1":
+        arr = arr.max() - arr
+    if crop_breast:
+        arr = crop_breast_region(arr)
+    lo, hi = np.percentile(arr, [0.5, 99.5])
+    arr = np.clip(arr, lo, hi)
+    arr = (arr - lo) / max(hi - lo, 1e-6)
+
+    target = (size, size) if isinstance(size, int) else size
+    if crop_breast and letterbox:
+        arr = _letterbox_pad(arr, target_w=target[0], target_h=target[1])
+
+    from PIL import Image
+
+    img = Image.fromarray((arr * 255).astype(np.uint8))
+    img = img.resize(target, Image.BILINEAR)
+    out = (np.asarray(img).astype(np.float32)) / 255.0
+    if laterality == "R":
+        out = np.ascontiguousarray(out[:, ::-1])
+    return out
+
+
+# MLO is preferred over CC for CVD/BAC work -- the BAC paper (Dapamede et al.,
+# EHJ 2026) uses MLO specifically because that plane is more perpendicular to
+# breast arteries, so calcification is more visible there than on CC.
+MLO_VIEWS = ["L_MLO", "R_MLO"]
+
+
+VIEW_TO_IDX = {v: i for i, v in enumerate(STANDARD_VIEWS)}
+
+
+class MammoCVDDataset(Dataset):
+    """Returns (views (V,1,H,W), mask (V,), view_idx (V,), label (scalar), empi).
+
+    view_mode="all" -> up to 4 standard views (L_CC/L_MLO/R_CC/R_MLO), pooled
+    by MiraiExamEncoder's attention pooling.
+    view_mode="single_mlo" -> exactly 1 view (whichever MLO side is present;
+    L_MLO preferred, falls back to R_MLO), for a faster first-pass signal
+    check -- cuts DICOM decode 4x and makes the cross-view attention pooling
+    a no-op (V=1)."""
+
+    def __init__(self, split: str, size: int = IMG_SIZE, splits_csv: Path | None = None,
+                 view_mode: str = "all"):
+        assert view_mode in ("all", "single_mlo")
+        self.view_mode = view_mode
+        self.views_to_use = STANDARD_VIEWS if view_mode == "all" else MLO_VIEWS
+
+        df = pd.read_csv(COHORT_CSV, dtype={"empi": str, "bathuan_folder_id": str})
+        if view_mode == "single_mlo":
+            df = df[df["path_L_MLO"].notna() | df["path_R_MLO"].notna()].reset_index(drop=True)
+        else:
+            df = df[df["n_views_available"] >= 1].reset_index(drop=True)
+        if splits_csv is not None:
+            splits = pd.read_csv(splits_csv, dtype={"empi": str})
+            df = df.merge(splits[["empi", "split"]], on="empi", how="inner")
+            df = df[df["split"] == split].reset_index(drop=True)
+        self.df = df
+        self.size = size
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def _get_single_mlo(self, row):
+        for v in MLO_VIEWS:
+            p = row.get(f"path_{v}")
+            if isinstance(p, str) and p:
+                try:
+                    return [load_mammo_view(p, self.size, laterality=v[0])], [1.0], [VIEW_TO_IDX[v]]
+                except Exception:
+                    continue
+        return [np.zeros((self.size, self.size), dtype=np.float32)], [0.0], [VIEW_TO_IDX[MLO_VIEWS[0]]]
+
+    def __getitem__(self, idx: int):
+        row = self.df.iloc[idx]
+        if self.view_mode == "single_mlo":
+            imgs, mask, view_idx = self._get_single_mlo(row)
+        else:
+            imgs, mask, view_idx = [], [], []
+            for v in STANDARD_VIEWS:
+                p = row.get(f"path_{v}")
+                if isinstance(p, str) and p:
+                    try:
+                        imgs.append(load_mammo_view(p, self.size, laterality=v[0]))
+                        mask.append(1.0)
+                        view_idx.append(VIEW_TO_IDX[v])
+                        continue
+                    except Exception:
+                        pass
+                imgs.append(np.zeros((self.size, self.size), dtype=np.float32))
+                mask.append(0.0)
+                view_idx.append(VIEW_TO_IDX[v])
+
+        views = torch.from_numpy(np.stack(imgs)).unsqueeze(1)  # (V, 1, H, W)
+        mask = torch.tensor(mask, dtype=torch.float32)  # (V,)
+        view_idx = torch.tensor(view_idx, dtype=torch.long)
+        label = torch.tensor(float(row["cvd_label"]))
+        return views, mask, view_idx, label, row["empi"]
