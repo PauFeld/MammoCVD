@@ -1,7 +1,7 @@
 """
 Precomputes frozen Mammo-CLIP/Mammo-FM embeddings for every L_MLO/R_MLO
 view in a cohort, cached to disk keyed by scan identity
-({empi}_{study_date}_{view}.npy) rather than just {empi}_{view}.npy --
+({patient_id}_{study_date}_{view}.npy) rather than just {patient_id}_{view}.npy --
 a patient can have more than one scan (e.g. across different cohort
 labeling strategies), so the cache key includes study_date to avoid
 silently mixing embeddings from the wrong scan.
@@ -10,7 +10,7 @@ Loading (DICOM decode + preprocessing) is parallelized across a CPU
 worker pool while the GPU forward pass runs in batches, since decode is
 the bottleneck relative to the encoder's forward pass.
 
-Output: outputs/mammo_cvd/{mammo_clip,mammo_fm}_embeddings_scankeyed/{empi}_{study_date}_{view}.npy
+Output: outputs/mammo_cvd/{mammo_clip,mammo_fm}_embeddings_scankeyed/{patient_id}_{study_date}_{view}.npy
 
 Run:
   python -m src.mammo_cvd.extract_embeddings_scankeyed --backbone mammoclip --cohort_csv <path>
@@ -38,7 +38,7 @@ LOAD_TIMEOUT_S = 60
 # grayscale PNG as a byproduct of extraction, keyed the same scan-specific
 # way as the embeddings themselves. Mammo-CLIP and Mammo-FM share identical
 # preprocessing (load_mammo_fm_view is an alias of load_mammo_clip_view),
-# so one PNG per (empi, study_date, view) is valid input for both backbones
+# so one PNG per (patient_id, study_date, view) is valid input for both backbones
 # -- whichever extraction pass runs first writes it, the other skips.
 PNG_DIR = OUT_DIR / "stretched_png_cache_scankeyed"
 
@@ -96,7 +96,7 @@ def main():
     print(f"device: {device}, backbone: {args.backbone}")
     model = build_encoder(device)
 
-    df = pd.read_csv(args.cohort_csv, dtype={"empi": str})
+    df = pd.read_csv(args.cohort_csv, dtype={"patient_id": str})
     df["study_date"] = pd.to_datetime(df["study_date"]).dt.strftime("%Y%m%d")
     print(f"cohort: {len(df)} patients")
 
@@ -106,7 +106,7 @@ def main():
             p = row.get(f"path_{v}")
             if not (isinstance(p, str) and p):
                 continue
-            out_key = f"{row['empi']}_{row['study_date']}_{v}"
+            out_key = f"{row['patient_id']}_{row['study_date']}_{v}"
             out_path = embed_dir / f"{out_key}.npy"
             if out_path.exists():
                 continue

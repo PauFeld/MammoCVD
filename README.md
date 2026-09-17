@@ -6,17 +6,14 @@
 
 
 Paula Feldman, Nusrat Binta Nizam, Sunwoo Kwak, Batuhan Karaman, Katerina Dodelzon,
-Mert Sabuncu — Weill Cornell Medicine / Cornell Tech. **Preprint:** arXiv link TBD.
+Mert Sabuncu. Weill Cornell Medicine / Cornell Tech.
 
 ## Summary
 
-We train a MLP on **frozen mammography foundation models** (Mammo-CLIP, Mammo-FM) —
-pretrained only for breast-cancer tasks, no cardiovascular supervision — to predict
-5-year MACE directly from raw screening mammograms. No calcification segmentation
+We train a MLP on **frozen mammography foundation models** (Mammo-CLIP, Mammo-FM)to predict 5-year MACE directly from raw screening mammograms. No calcification segmentation
 or BAC annotation is needed anywhere in the pipeline: the exam-level embedding
 alone gets AUROC ≈ 0.82 (vs. 0.765 age-only, 0.859 full tabular), and Grad-CAM
-shows the models attend to vessel-like structures without ever being told where
-they are.
+shows the models attend to vessel-like structures without ever being told where they are.
 
 ## Results (held-out test set, n = 5,287; 118 events)
 
@@ -42,17 +39,17 @@ expected interface but expects you to point `cohort_csv` at your own data.
 ```
 src/mammo_cvd/
   dataset.py                                DICOM loading/preprocessing utilities +
-                                             ExamDataset (placeholder — plug in your data)
+                                             ExamDataset (placeholder, plug in your data)
   mammo_clip_features.py / mammo_fm_features.py   frozen EfficientNet-B5 encoder wrappers
-                                             (real, working — just need the public weights)
+                                             (needs the public weights)
   extract_embeddings_scankeyed.py           precompute per-view embeddings
   train_finetune_simplefusion_scankeyed.py  mean-pool + MLP head trainer (image arms)
   train_finetune_tabular_only.py / train_age_only.py   baselines
   compare_arms.py                           bootstrap CIs + DeLong tests across arms
 ```
 
-Expected cohort CSV schema: one row per instance — `patientID, study_date, label_5yr,
-path_L_MLO, path_R_MLO, age_at_baseline` — plus a `splits.csv` (`empi, split`) and,
+Expected cohort CSV schema: one row per instance: `patientID, study_date, label_5yr,
+path_L_MLO, path_R_MLO, age_at_baseline` — plus a `splits.csv` (`patient_id, split`) and,
 for the tabular arm, a `tabular_features.csv` of per-patient risk factors.
 
 ## Setup
@@ -60,8 +57,6 @@ for the tabular arm, a `tabular_features.csv` of per-patient risk factors.
 ```bash
 pip install torch pandas numpy scikit-learn matplotlib pillow pydicom requests
 ```
-
-All paths come from environment variables (nothing institutional is hardcoded):
 
 | Variable                        | Purpose                                        |
 |----------------------------------|------------------------------------------------|

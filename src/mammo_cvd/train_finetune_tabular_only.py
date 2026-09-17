@@ -1,5 +1,5 @@
 """
-Tabular-only baseline for the fixed-5yr-MACE binary task. No image, no GPU
+Tabular-only baseline for the fixed-5yr-MACE binary task. No image
 needed.
 
 Architecture: TabularEncoder (missingness-aware) + small MLP head -> single
@@ -26,33 +26,16 @@ COHORT_CSV = OUT_DIR / "finetune_cohort.csv"
 SPLITS_CSV = OUT_DIR / "finetune_splits.csv"
 TABULAR_CSV = OUT_DIR / "tabular_features_v2.csv"
 
-# "cardiovascular" features require the patient to have had CVD-relevant
-# testing/diagnosis; "demographic" features are routinely available with no
-# workup needed. Medication flags (statin_med, antihypertensive_med) are
-# excluded from the cardiovascular set by default: a medication flag
-# reflects "a clinician already diagnosed elevated risk and chose to treat
-# it," not a raw physiological measurement, which risks making that arm
-# partly a "was this patient already flagged by a doctor" detector rather
-# than a genuine risk-signal baseline. Diagnosis flags (diabetes,
-# hypertension) are kept, since they represent risk-factor conditions
-# rather than a treatment decision made in response to assessed risk.
+
 CARDIOVASCULAR_CONTINUOUS = ["total_cholesterol", "ldl", "hdl", "triglycerides", "creatinine", "hba1c"]
 CARDIOVASCULAR_BINARY = ["diabetes", "hypertension_dx"]
 DEMOGRAPHIC_CONTINUOUS = ["age_at_baseline", "bmi"]
 DEMOGRAPHIC_BINARY = ["smoker", "alcohol_use", "family_hx_cvd"]
-MEDICATION_BINARY = ["antihypertensive_med", "statin_med"]  # excluded from all tiers below by default
 
 FEATURE_SETS = {
     "all": (CARDIOVASCULAR_CONTINUOUS + DEMOGRAPHIC_CONTINUOUS, CARDIOVASCULAR_BINARY + DEMOGRAPHIC_BINARY),
     "cardiovascular": (CARDIOVASCULAR_CONTINUOUS, CARDIOVASCULAR_BINARY),
     "demographic": (DEMOGRAPHIC_CONTINUOUS, DEMOGRAPHIC_BINARY),
-    "all_with_meds": (CARDIOVASCULAR_CONTINUOUS + DEMOGRAPHIC_CONTINUOUS,
-                       CARDIOVASCULAR_BINARY + DEMOGRAPHIC_BINARY + MEDICATION_BINARY),
-    # Isolates statin_med specifically, separate from all_with_meds (which
-    # also adds antihypertensive_med), so the effect of one feature at a
-    # time can be read cleanly.
-    "all_with_statin": (CARDIOVASCULAR_CONTINUOUS + DEMOGRAPHIC_CONTINUOUS,
-                         CARDIOVASCULAR_BINARY + DEMOGRAPHIC_BINARY + ["statin_med"]),
 }
 
 
@@ -63,33 +46,21 @@ class TabularOnlyDataset(Dataset):
         self.continuous_features = continuous_features
         self.binary_features = binary_features
         self.all_features = continuous_features + binary_features
-        # Feature knockout (randomly masking present features as "missing"
-        # during training, arxiv.org/abs/2405.20448): forces the model to
-        # not over-rely on any single feature always being present. Only
-        # ever applied when split=="train" (set below), never val/test.
         self.knockout_prob = knockout_prob if split == "train" else 0.0
 
         cohort_csv = cohort_csv or COHORT_CSV
         splits_csv = splits_csv or SPLITS_CSV
         tabular_csv = tabular_csv or TABULAR_CSV
-        cohort = pd.read_csv(cohort_csv, dtype={"empi": str})
-        tab = pd.read_csv(tabular_csv, dtype={"empi": str})
-        splits = pd.read_csv(splits_csv, dtype={"empi": str})
+        cohort = pd.read_csv(cohort_csv, dtype={"patient_id": str})
+        tab = pd.read_csv(tabular_csv, dtype={"patient_id": str})
+        splits = pd.read_csv(splits_csv, dtype={"patient_id": str})
 
-        cohort_cols = ["empi", "label_5yr"]
-        # Some cohort files carry their own (possibly re-anchored)
-        # age_at_baseline that should take precedence over tabular_csv's,
-        # e.g. if a patient's baseline scan date differs from what
-        # tabular_csv was built against.
+        cohort_cols = ["patient_id", "label_5yr"]
         has_age_override = "age_at_baseline" in cohort.columns
         if has_age_override:
             cohort_cols.append("age_at_baseline")
-        # A multi-instance cohort (one row per (empi, study_date), not one
-        # per empi -- see ExamDataset/multi-instance train expansion) needs
-        # a study_date join too, or a patient's multiple cohort rows would
-        # cross-multiply against their multiple tabular rows. Falls back to
-        # an empi-only join for single-instance cohorts/tabular files.
-        join_keys = ["empi"]
+
+        join_keys = ["patient_id"]
         if "study_date" in tab.columns and "study_date" in cohort.columns:
             cohort_cols.append("study_date")
             join_keys.append("study_date")
@@ -97,7 +68,7 @@ class TabularOnlyDataset(Dataset):
         if has_age_override:
             df["age_at_baseline"] = df["age_at_baseline_cohort"].combine_first(df["age_at_baseline"])
             df = df.drop(columns=["age_at_baseline_cohort"])
-        df = df.merge(splits, on="empi", how="inner")
+        df = df.merge(splits, on="patient_id", how="inner")
         self.df = df[df["split"] == split].reset_index(drop=True)
 
         if norm_stats is None:
@@ -134,7 +105,7 @@ class TabularOnlyDataset(Dataset):
         return (torch.tensor(values, dtype=torch.float32),
                 torch.tensor(mask, dtype=torch.float32),
                 torch.tensor(float(row["label_5yr"])),
-                row["empi"])
+                row["patient_id"])
 
 
 class TabularEncoder(nn.Module):

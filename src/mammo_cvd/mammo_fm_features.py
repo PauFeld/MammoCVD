@@ -68,11 +68,11 @@ if __name__ == "__main__":
     import numpy as np
     import pandas as pd
     df = pd.read_csv(os.environ.get("MAMMOCVD_FINETUNE_COHORT_CSV", "outputs/mammo_cvd/finetune_cohort.csv"),
-                      dtype={"empi": str}, nrows=3)
+                      dtype={"patient_id": str}, nrows=3)
     for _, row in df.iterrows():
         p = row.get("path_L_MLO")
         if isinstance(p, str) and p:
             view = load_mammo_fm_view(p, laterality="L")
             embed = extract_embedding(model, view, device)
-            print(f"empi={row['empi']} embed shape={embed.shape} "
+            print(f"patient_id={row['patient_id']} embed shape={embed.shape} "
                   f"norm={np.linalg.norm(embed):.3f} mean={embed.mean():.4f} std={embed.std():.4f}")

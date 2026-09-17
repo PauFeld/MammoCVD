@@ -3,10 +3,10 @@ Trains the image-arm risk head (frozen Mammo-CLIP or Mammo-FM backbone +
 mean-pool over L_MLO/R_MLO + small MLP head) on precomputed embeddings.
 --backbone selects which encoder's embeddings to use at runtime.
 
-The embedding cache is keyed by scan identity (empi, study_date, view) --
+The embedding cache is keyed by scan identity (patient_id, study_date, view) --
 see extract_embeddings_scankeyed.py -- so a patient with multiple scans
 across cohort variants always trains on the correct one, not whichever was
-cached first under an empi-only key.
+cached first under an patient_id-only key.
 """
 from __future__ import annotations
 
@@ -28,23 +28,23 @@ MLO_VIEWS = ["L_MLO", "R_MLO"]
 
 
 class ScanKeyedEmbedDataset(Dataset):
-    """Loads every (empi, study_date, view) embedding .npy for this split
+    """Loads every (patient_id, study_date, view) embedding .npy for this split
     into an in-memory dict once at init, rather than re-reading from disk
     on every __getitem__ call -- a cohort's full embedding set easily fits
     in RAM, and the head being trained is tiny, so I/O would otherwise
     dominate epoch time."""
     def __init__(self, split: str, cohort_csv: str, splits_csv: str, embed_dir: Path, embed_dim: int):
-        cohort = pd.read_csv(cohort_csv, dtype={"empi": str})
+        cohort = pd.read_csv(cohort_csv, dtype={"patient_id": str})
         cohort["study_date"] = pd.to_datetime(cohort["study_date"]).dt.strftime("%Y%m%d")
-        splits = pd.read_csv(splits_csv, dtype={"empi": str})
-        df = cohort.merge(splits, on="empi", how="inner")
+        splits = pd.read_csv(splits_csv, dtype={"patient_id": str})
+        df = cohort.merge(splits, on="patient_id", how="inner")
         self.df = df[df["split"] == split].reset_index(drop=True)
         self.embed_dim = embed_dim
 
         self._cache: dict[str, np.ndarray] = {}
         for row in self.df.itertuples(index=False):
             for v in MLO_VIEWS:
-                key = f"{row.empi}_{row.study_date}_{v}"
+                key = f"{row.patient_id}_{row.study_date}_{v}"
                 p = embed_dir / f"{key}.npy"
                 if p.exists():
                     self._cache[key] = np.load(p).astype(np.float32)
@@ -56,7 +56,7 @@ class ScanKeyedEmbedDataset(Dataset):
         row = self.df.iloc[idx]
         embeds, mask = [], []
         for v in MLO_VIEWS:
-            key = f"{row['empi']}_{row['study_date']}_{v}"
+            key = f"{row['patient_id']}_{row['study_date']}_{v}"
             cached = self._cache.get(key)
             if cached is not None:
                 embeds.append(cached)
@@ -192,8 +192,8 @@ def main():
     print(f"\nFINAL TEST ({args.backbone} simple mean-pool fusion, {args.run_tag}): auroc={test_auroc:.4f} "
           f"(baseline prevalence={labels.mean():.4f})")
 
-    empis = test_ds.df["empi"].values
-    pred_df = pd.DataFrame({"empi": empis, "label": labels, "prob": probs})
+    empis = test_ds.df["patient_id"].values
+    pred_df = pd.DataFrame({"patient_id": empis, "label": labels, "prob": probs})
     pred_path = OUT_DIR / f"test_predictions_{args.backbone}_simplefusion_{args.run_tag}_test{seed_suffix}.csv"
     pred_df.to_csv(pred_path, index=False)
     print(f"Wrote {pred_path}")

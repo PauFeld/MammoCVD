@@ -178,7 +178,7 @@ class ExamDataset(Dataset):
     `cohort_csv` should have one row per patient/instance with columns
     `path_L_MLO` / `path_R_MLO` (and `path_L_CC` / `path_R_CC` if using all
     four standard views) pointing at real DICOM files, plus a label column.
-    `splits_csv` should have `empi, split` (train/val/test)."""
+    `splits_csv` should have `patient_id, split` (train/val/test)."""
 
     def __init__(self, split: str, cohort_csv: str, size: int = IMG_SIZE,
                  splits_csv: str | None = None, view_mode: str = "single_mlo"):
@@ -187,10 +187,10 @@ class ExamDataset(Dataset):
         self.views_to_use = STANDARD_VIEWS if view_mode == "all" else MLO_VIEWS
         self.size = size
 
-        df = pd.read_csv(cohort_csv, dtype={"empi": str})
+        df = pd.read_csv(cohort_csv, dtype={"patient_id": str})
         if splits_csv is not None:
-            splits = pd.read_csv(splits_csv, dtype={"empi": str})
-            df = df.merge(splits[["empi", "split"]], on="empi", how="inner")
+            splits = pd.read_csv(splits_csv, dtype={"patient_id": str})
+            df = df.merge(splits[["patient_id", "split"]], on="patient_id", how="inner")
             df = df[df["split"] == split].reset_index(drop=True)
         self.df = df
 
@@ -218,4 +218,4 @@ class ExamDataset(Dataset):
         mask = torch.tensor(mask, dtype=torch.float32)  # (V,)
         view_idx = torch.tensor(view_idx, dtype=torch.long)
         label = torch.tensor(float(row["label_5yr"]))
-        return views, mask, view_idx, label, row["empi"]
+        return views, mask, view_idx, label, row["patient_id"]

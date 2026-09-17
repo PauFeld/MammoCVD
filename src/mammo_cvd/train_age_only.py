@@ -1,7 +1,6 @@
 """
 Age-only baseline: a plain (unweighted) LogisticRegression(age_at_baseline).
-Deterministic (closed-form sklearn fit, no training-seed randomness) --
-run once per cohort, not multiple seeds like the neural-net arms.
+Deterministic (closed-form sklearn fit, no training-seed randomness) 
 
 Output: outputs/mammo_cvd/test_predictions_age_only_{run_tag}.csv
 """
@@ -27,9 +26,9 @@ def main():
     ap.add_argument("--run_tag", type=str, required=True)
     args = ap.parse_args()
 
-    cohort = pd.read_csv(args.cohort_csv, dtype={"empi": str})
-    splits = pd.read_csv(args.splits_csv, dtype={"empi": str})
-    df = cohort.merge(splits, on="empi", how="inner").dropna(subset=["age_at_baseline"])
+    cohort = pd.read_csv(args.cohort_csv, dtype={"patient_id": str})
+    splits = pd.read_csv(args.splits_csv, dtype={"patient_id": str})
+    df = cohort.merge(splits, on="patient_id", how="inner").dropna(subset=["age_at_baseline"])
 
     train = df[df["split"] == "train"]
     val = df[df["split"] == "val"]
@@ -43,7 +42,7 @@ def main():
     auroc = roc_auc_score(labels, probs)
     print(f"FINAL TEST (age-only, {args.run_tag}): auroc={auroc:.4f} (baseline prevalence={labels.mean():.4f})")
 
-    pred_df = pd.DataFrame({"empi": test["empi"].values, "label": labels, "prob": probs})
+    pred_df = pd.DataFrame({"patient_id": test["patient_id"].values, "label": labels, "prob": probs})
     pred_path = OUT_DIR / f"test_predictions_age_only_{args.run_tag}.csv"
     pred_df.to_csv(pred_path, index=False)
     print(f"Wrote {pred_path}")

@@ -1,11 +1,10 @@
 """
-Cross-arm comparison on the strict_cv held-out test set (n=5,287, 118
-events, see README): AUROC + bootstrap CI + sensitivity/specificity at
+Cross-arm comparison on the strict_cv held-out test set: AUROC + bootstrap CI + sensitivity/specificity at
 the Youden-J optimal threshold for each of the four reported arms
 (age-only, tabular, Mammo-CLIP, Mammo-FM), plus pairwise DeLong
 significance tests.
 
-Expects the four arms' `test_predictions_*.csv` files (empi,label,prob)
+Expects the four arms' `test_predictions_*.csv` files (patient_id,label,prob)
 under $MAMMOCVD_ROOT/outputs/mammo_cvd/, produced by
 train_age_only.py / train_finetune_tabular_only.py /
 train_finetune_simplefusion_scankeyed.py against the strict_cv_test.csv
@@ -121,8 +120,8 @@ def main():
         if not path.exists():
             print(f"  skipping {arm}: {fname} not found yet")
             continue
-        d = pd.read_csv(path, dtype={"empi": str}).rename(columns={"prob": arm})
-        frames[arm] = d[["empi", "label", arm]] if not frames else d[["empi", arm]]
+        d = pd.read_csv(path, dtype={"patient_id": str}).rename(columns={"prob": arm})
+        frames[arm] = d[["patient_id", "label", arm]] if not frames else d[["patient_id", arm]]
 
     if "tabular" not in frames:
         raise SystemExit("need at least test_predictions_tabular.csv (carries the label column) to proceed")
@@ -130,7 +129,7 @@ def main():
     df = frames.pop("tabular")
     df = df.rename(columns={list(df.columns)[-1]: "tabular"}) if "tabular" not in df.columns else df
     for arm, d in frames.items():
-        df = df.merge(d, on="empi", how="inner")
+        df = df.merge(d, on="patient_id", how="inner")
     print(f"matched patients across all arms: {len(df)} (positives={df['label'].sum()})")
 
     labels = df["label"].values
