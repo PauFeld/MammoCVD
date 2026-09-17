@@ -1,8 +1,7 @@
 """
 Frozen feature extraction using Mammo-CLIP's pretrained EfficientNet-B5
 image encoder (batmanlab, github.com/batmanlab/Mammo-CLIP, weights on HF
-at shawn24/Mammo-CLIP) -- trained on UPMC mammogram-report pairs, ~5-8x
-more patients than our own DINO pretraining pool.
+at shawn24/Mammo-CLIP) -- trained on UPMC mammogram-report pairs.
 
 Reuses their own vendored EfficientNet implementation and checkpoint's
 embedded config directly (not a hand-reconstructed guess at their
@@ -104,16 +103,13 @@ def load_mammo_clip_view(path: str, laterality: str | None = None,
     region then stretches directly to the fixed target size, no aspect-
     ratio-preserving pad -- matching that exactly (not "fixing" it) since
     their pretrained backbone's weights were calibrated to that stretched
-    distribution (checked 2026-08-21, see load_mammo_view's docstring).
+    distribution (see load_mammo_view's docstring).
 
-    save_png_path (2026-09-04, per user -- "save the pngs of the properly
-    extracted stretched [images], otherwise you will generate gradcam on
-    the wrong pngs"): if given, writes the pre-normalization grayscale
+    save_png_path: if given, writes the pre-normalization grayscale
     (post-crop, post-stretch, pre-RGB-stack, pre-z-score) as an 8-bit PNG
-    -- this is the actual visual input the frozen backbone sees, distinct
-    from build_png_cache_all_bathuan.py's cache (which uses letterbox=True,
-    the wrong preprocessing for this arm -- see 2026-09-04 finding). Skips
-    the write if the file already exists (cheap, no re-encode)."""
+    -- this is the actual visual input the frozen backbone sees, useful for
+    Grad-CAM overlays or spot-checking preprocessing. Skips the write if
+    the file already exists (cheap, no re-encode)."""
     gray = load_mammo_view(path, size=(IMG_SIZE_W, IMG_SIZE_H), laterality=laterality,
                             letterbox=False)  # (H,W) in [0,1]
     if save_png_path is not None and not os.path.exists(save_png_path):

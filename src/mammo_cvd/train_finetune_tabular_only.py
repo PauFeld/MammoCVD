@@ -1,13 +1,10 @@
 """
-Tabular-only baseline for the X-Cardia-style fixed-5yr-MACE binary task
-(finetune_cohort.csv / finetune_splits.csv). No image, no GPU needed --
-runs while DINO pretraining occupies the GPU. This is the number the
-DINO-pretrained and no-pretraining image models both need to beat (or at
-least understand their relationship to) once fine-tuning runs.
+Tabular-only baseline for the fixed-5yr-MACE binary task. No image, no GPU
+needed.
 
 Architecture: TabularEncoder (missingness-aware) + small MLP head -> single
-logit. Uses the expanded v2 tabular feature set (build_tabular_features_v2.py):
-labs, diabetes/hypertension flags, medication flags, smoking/alcohol, family
+logit. Expects a tabular_csv of per-patient risk factors: labs,
+diabetes/hypertension flags, medication flags, smoking/alcohol, family
 history of CVD, age.
 """
 from __future__ import annotations
@@ -29,27 +26,18 @@ COHORT_CSV = OUT_DIR / "finetune_cohort.csv"
 SPLITS_CSV = OUT_DIR / "finetune_splits.csv"
 TABULAR_CSV = OUT_DIR / "tabular_features_v2.csv"
 
-# Split per user's three-question framing (2026-08-19): "cardiovascular workup"
-# features require the patient to have had CVD-relevant testing/diagnosis;
-# "demographic" features are routinely available with no workup needed.
-#
-# statin_med and antihypertensive_med deliberately EXCLUDED from the
-# cardiovascular set (2026-08-19, per user): a medication flag reflects
-# "a clinician already diagnosed elevated risk and chose to treat it," not
-# a raw physiological measurement -- including it makes the "cardiovascular
-# workup" baseline partly a "was this patient already flagged by a doctor"
-# detector, which is close to circular for testing whether the model finds
-# genuine risk signal. Diagnosis flags (diabetes, hypertension) are kept --
-# also clinical-judgment-derived, but they represent actual risk-factor
-# conditions rather than a treatment decision already made in response to
-# assessed risk, a meaningfully different level of circularity.
+# "cardiovascular" features require the patient to have had CVD-relevant
+# testing/diagnosis; "demographic" features are routinely available with no
+# workup needed. Medication flags (statin_med, antihypertensive_med) are
+# excluded from the cardiovascular set by default: a medication flag
+# reflects "a clinician already diagnosed elevated risk and chose to treat
+# it," not a raw physiological measurement, which risks making that arm
+# partly a "was this patient already flagged by a doctor" detector rather
+# than a genuine risk-signal baseline. Diagnosis flags (diabetes,
+# hypertension) are kept, since they represent risk-factor conditions
+# rather than a treatment decision made in response to assessed risk.
 CARDIOVASCULAR_CONTINUOUS = ["total_cholesterol", "ldl", "hdl", "triglycerides", "creatinine", "hba1c"]
 CARDIOVASCULAR_BINARY = ["diabetes", "hypertension_dx"]
-# BMI moved to demographic 2026-08-19 (per user): it's a routine vital-sign
-# measurement (height/weight), not something requiring a dedicated
-# cardiovascular workup order the way a lipid panel does -- currently 0%
-# coverage in our data regardless (same "lab code postdates our cohort's
-# era" issue as eGFR), but the tier assignment matters if that's ever fixed.
 DEMOGRAPHIC_CONTINUOUS = ["age_at_baseline", "bmi"]
 DEMOGRAPHIC_BINARY = ["smoker", "alcohol_use", "family_hx_cvd"]
 MEDICATION_BINARY = ["antihypertensive_med", "statin_med"]  # excluded from all tiers below by default
@@ -60,11 +48,9 @@ FEATURE_SETS = {
     "demographic": (DEMOGRAPHIC_CONTINUOUS, DEMOGRAPHIC_BINARY),
     "all_with_meds": (CARDIOVASCULAR_CONTINUOUS + DEMOGRAPHIC_CONTINUOUS,
                        CARDIOVASCULAR_BINARY + DEMOGRAPHIC_BINARY + MEDICATION_BINARY),
-    # Isolates statin_med specifically (2026-08-22, per user) -- separate from
-    # all_with_meds (which also adds antihypertensive_med) so the effect of
-    # this one feature can be read cleanly before deciding whether to add
-    # antihypertensive_med too. 100% coverage in tabular_features_v2.csv
-    # (20.1% prevalence), no missingness handling needed.
+    # Isolates statin_med specifically, separate from all_with_meds (which
+    # also adds antihypertensive_med), so the effect of one feature at a
+    # time can be read cleanly.
     "all_with_statin": (CARDIOVASCULAR_CONTINUOUS + DEMOGRAPHIC_CONTINUOUS,
                          CARDIOVASCULAR_BINARY + DEMOGRAPHIC_BINARY + ["statin_med"]),
 }
@@ -77,9 +63,10 @@ class TabularOnlyDataset(Dataset):
         self.continuous_features = continuous_features
         self.binary_features = binary_features
         self.all_features = continuous_features + binary_features
-        # Knockout (arxiv.org/abs/2405.20448), see pretrain_mmcl.py's
-        # MMCLDataset.knockout_prob docstring for the full rationale --
-        # only ever applied when split=="train" (set below), never val/test.
+        # Feature knockout (randomly masking present features as "missing"
+        # during training, arxiv.org/abs/2405.20448): forces the model to
+        # not over-rely on any single feature always being present. Only
+        # ever applied when split=="train" (set below), never val/test.
         self.knockout_prob = knockout_prob if split == "train" else 0.0
 
         cohort_csv = cohort_csv or COHORT_CSV
@@ -90,20 +77,18 @@ class TabularOnlyDataset(Dataset):
         splits = pd.read_csv(splits_csv, dtype={"empi": str})
 
         cohort_cols = ["empi", "label_5yr"]
-        # landmark_cohort.csv carries its own (re-anchored) age_at_baseline
-        # for the 267 relabeled patients -- tabular_features_v2.csv's age
-        # is stale for exactly those rows (built against the ORIGINAL
-        # baseline dates), so prefer the cohort file's age when present.
+        # Some cohort files carry their own (possibly re-anchored)
+        # age_at_baseline that should take precedence over tabular_csv's,
+        # e.g. if a patient's baseline scan date differs from what
+        # tabular_csv was built against.
         has_age_override = "age_at_baseline" in cohort.columns
         if has_age_override:
             cohort_cols.append("age_at_baseline")
-        # 2026-09-03: multi-instance-aware tabular files (dual-pair cohort)
-        # have one row per (empi, study_date) instance, not one per empi --
-        # merging on empi alone would cross-multiply a patient's multiple
-        # cohort rows against their multiple tabular rows. Join on both
-        # keys whenever the tabular file carries study_date (built by
-        # build_tabular_features_v2_multiinstance.py); falls back to the
-        # original empi-only join for the single-instance tabular files.
+        # A multi-instance cohort (one row per (empi, study_date), not one
+        # per empi -- see ExamDataset/multi-instance train expansion) needs
+        # a study_date join too, or a patient's multiple cohort rows would
+        # cross-multiply against their multiple tabular rows. Falls back to
+        # an empi-only join for single-instance cohorts/tabular files.
         join_keys = ["empi"]
         if "study_date" in tab.columns and "study_date" in cohort.columns:
             cohort_cols.append("study_date")
@@ -217,23 +202,16 @@ def main():
                      help="distinguishes output filenames from --feature_set alone, e.g. "
                           "'all_knockout' -- defaults to --feature_set if unset")
     ap.add_argument("--seed", type=int, default=0,
-                     help="for multi-seed variance estimates -- seed 0 keeps the original, "
-                          "un-suffixed checkpoint/prediction filenames exactly as before; "
-                          "seed!=0 appends _seedN so repeat runs don't collide")
-    ap.add_argument("--cohort_csv", type=str, default=None, help="override COHORT_CSV, e.g. landmark_cohort.csv")
-    ap.add_argument("--splits_csv", type=str, default=None, help="override SPLITS_CSV, e.g. landmark_cohort_splits.csv")
-    ap.add_argument("--tabular_csv", type=str, default=None, help="override TABULAR_CSV, e.g. a per-experiment baseline-restricted tabular_features_v2_{tag}.csv")
+                     help="for multi-seed variance estimates -- seed!=0 appends _seedN to "
+                          "checkpoint/prediction filenames so repeat runs don't collide")
+    ap.add_argument("--cohort_csv", type=str, default=None, help="override COHORT_CSV")
+    ap.add_argument("--splits_csv", type=str, default=None, help="override SPLITS_CSV")
+    ap.add_argument("--tabular_csv", type=str, default=None, help="override TABULAR_CSV")
     args = ap.parse_args()
 
-    # 2026-08-23: no script in this project set a fixed seed before this --
-    # every training run got a different random init/shuffle order, which
-    # is how an old, un-`--run_tag`-ed checkpoint (best_finetune_tabular_all.pt)
-    # ended up mismatching its own logged result (two different invocations
-    # silently overwrote the same unversioned path with two different valid
-    # but non-identical models). Model init/dropout are covered by the two
-    # seed calls below; DataLoader shuffle order is covered by the seeded
-    # `generator=` passed to it explicitly (a bare global seed does not
-    # fully control shuffle order).
+    # Seeds model init/dropout; DataLoader shuffle order is separately
+    # covered by the seeded `generator=` passed to it below (a bare global
+    # seed does not fully control shuffle order).
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 

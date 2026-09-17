@@ -6,17 +6,13 @@ successor to Mammo-CLIP (arXiv:2512.00198, "Breast-specific foundational
 model for Integrated Mammographic Diagnosis, Prognosis, and Reporting"),
 trained on UPMC + EMBED + Boston Medical Center + Mayo Clinic mammogram-
 report pairs (multi-institution, larger and more diverse than Mammo-CLIP's
-single-site UPMC pretraining -- 2026-08-24, per user: "way more suitable
-than mammo clip").
+single-site UPMC pretraining).
 
-Same core method as Mammo-CLIP though, not a different objective --
-confirmed by inspecting the checkpoint directly: config.model.name is
-still 'clip_custom', image_encoder is still 'tf_efficientnet_b5_ns-detect'
-(identical backbone), same CLIP-style image-report contrastive alignment
-(plus added i2i/t2t auxiliary contrastive terms per config.loss.breast_clip),
-just bigger/more diverse training data and a newer text encoder
-(ModernBERT) -- the text side is irrelevant here since only the frozen
-image encoder is ever used downstream.
+Same core method as Mammo-CLIP though, not a different objective: same
+backbone (tf_efficientnet_b5_ns-detect) and same CLIP-style image-report
+contrastive alignment, just bigger/more diverse training data and a newer
+text encoder (ModernBERT) -- the text side is irrelevant here since only
+the frozen image encoder is ever used downstream.
 
 Checkpoint structure and preprocessing constants (mean=0.3089279,
 std=0.25053555408335154, image_size 1520x912, weight-key prefix
@@ -69,6 +65,7 @@ if __name__ == "__main__":
     model = build_mammo_fm_encoder(device)
     print(f"Mammo-FM encoder loaded, out_dim={model.out_dim}")
 
+    import numpy as np
     import pandas as pd
     df = pd.read_csv(os.environ.get("MAMMOCVD_FINETUNE_COHORT_CSV", "outputs/mammo_cvd/finetune_cohort.csv"),
                       dtype={"empi": str}, nrows=3)
@@ -78,4 +75,4 @@ if __name__ == "__main__":
             view = load_mammo_fm_view(p, laterality="L")
             embed = extract_embedding(model, view, device)
             print(f"empi={row['empi']} embed shape={embed.shape} "
-                  f"norm={embed.__class__.__name__}")
+                  f"norm={np.linalg.norm(embed):.3f} mean={embed.mean():.4f} std={embed.std():.4f}")

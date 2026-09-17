@@ -1,33 +1,14 @@
 """
-Generalized Mammo-CLIP/Mammo-FM embedding extraction, keyed by SCAN
-IDENTITY ({empi}_{study_date}_{view}.npy) instead of the existing
-{empi}_{view}.npy convention used by extract_mammo_clip_embeddings.py /
-extract_mammo_fm_embeddings.py -- 2026-09-03, required for the new
-expanded/symmetric-landmark cohort experiments.
+Precomputes frozen Mammo-CLIP/Mammo-FM embeddings for every L_MLO/R_MLO
+view in a cohort, cached to disk keyed by scan identity
+({empi}_{study_date}_{view}.npy) rather than just {empi}_{view}.npy --
+a patient can have more than one scan (e.g. across different cohort
+labeling strategies), so the cache key includes study_date to avoid
+silently mixing embeddings from the wrong scan.
 
-Why this exists: experiments 3/4/5a/5b (build_unified_finetune_cohort.py)
-can select DIFFERENT physical baseline scans for the SAME patient across
-cohort variants (confirmed: 11,879 / 18,017 patients have a different
-baseline study_date between the plain expanded cohort and its
-symmetric-landmark counterpart). The old empi-only cache key assumes one
-canonical scan per patient forever -- reusing it here would silently
-overwrite one cohort's embedding with a different scan's features (or
-silently reuse the wrong scan's embedding), with no error, for two-thirds
-of the expanded cohort. Keying by (empi, study_date, view) makes every
-scan-specific vector unique and content-addressed, so extracting for one
-cohort variant can never corrupt another's, and running this again for an
-overlapping cohort (same patient, same scan) correctly skips re-work.
-
-2026-09-03 perf fix: original version loaded+forward-passed one image at
-a time (batch size 1) -- at the observed rate this cohort's heaviest pass
-alone was projecting to ~7-8 more hours. DICOM decode + preprocessing is
-CPU-bound (pydicom read, percentile-clip, resize) while the actual
-EfficientNet-B5 forward pass is fast on GPU, so the fix is to parallelize
-loading across a worker pool (CPU-bound, overlaps I/O across workers) and
-batch the GPU forward pass (16 workers load concurrently, N loaded views
-get forward-passed together instead of one by one).
-
-MLO-only (L_MLO/R_MLO), matching this experiment set's scope.
+Loading (DICOM decode + preprocessing) is parallelized across a CPU
+worker pool while the GPU forward pass runs in batches, since decode is
+the bottleneck relative to the encoder's forward pass.
 
 Output: outputs/mammo_cvd/{mammo_clip,mammo_fm}_embeddings_scankeyed/{empi}_{study_date}_{view}.npy
 
@@ -53,17 +34,13 @@ OUT_DIR = PROJECT_ROOT / "outputs" / "mammo_cvd"
 MLO_VIEWS = ["L_MLO", "R_MLO"]
 BATCH_SIZE = 32
 LOAD_TIMEOUT_S = 60
-# 2026-09-04 per user: cache the correctly-preprocessed (crop+stretch,
-# letterbox=False) grayscale PNG as a byproduct of extraction, keyed the
-# same scan-specific way as the embeddings themselves -- distinct from
-# build_png_cache_all_bathuan.py's cache, which uses the wrong (letterboxed)
-# preprocessing for this arm. Mammo-CLIP and Mammo-FM share identical
+# Cache the correctly-preprocessed (crop+stretch, letterbox=False)
+# grayscale PNG as a byproduct of extraction, keyed the same scan-specific
+# way as the embeddings themselves. Mammo-CLIP and Mammo-FM share identical
 # preprocessing (load_mammo_fm_view is an alias of load_mammo_clip_view),
 # so one PNG per (empi, study_date, view) is valid input for both backbones
 # -- whichever extraction pass runs first writes it, the other skips.
 PNG_DIR = OUT_DIR / "stretched_png_cache_scankeyed"
-
-_BACKBONE = None
 
 
 class _Timeout(Exception):

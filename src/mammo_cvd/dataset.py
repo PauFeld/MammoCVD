@@ -11,20 +11,6 @@ from torch.utils.data import Dataset
 STANDARD_VIEWS = ["L_CC", "L_MLO", "R_CC", "R_MLO"]
 
 IMG_SIZE = 512
-# Mirai's own preprocessing resolution (Yala et al. 2021): (width, height).
-MIRAI_IMG_SIZE = (1664, 2048)
-# Same aspect ratio as MIRAI_IMG_SIZE (0.8125, matching our own native DICOMs'
-# ~3328x2560-4096x3328) but scaled down to ~the same pixel budget as the old
-# square IMG_SIZE=512 default -- isolates "does removing the square-resize's
-# aspect-ratio distortion help" from "does more resolution help", which a
-# jump straight to MIRAI_IMG_SIZE would confound together.
-ASPECT_CORRECT_IMG_SIZE = (480, 608)
-# Mammo-CLIP's own fixed resolution (width, height) -- see mammo_clip_features.py's
-# IMG_SIZE_W/IMG_SIZE_H, extracted from their checkpoint's embedded config. Exposed
-# here too so our own from-scratch ResNet-18 MMCL variant can be trained at the SAME
-# resolution as the Mammo-CLIP-backbone MMCL variant, for a resolution-matched
-# backbone-only comparison instead of confounding architecture with image size.
-MAMMOCLIP_IMG_SIZE = (912, 1520)
 
 
 def _count_up_continuing_ones(b_arr: np.ndarray) -> np.ndarray:
@@ -84,11 +70,8 @@ def crop_breast_region(arr: np.ndarray) -> np.ndarray:
     normalization still sees true DICOM intensities, not a lossy 0-255
     intermediate.
 
-    Real bug this fixes: confirmed via Grad-CAM saliency maps that both our
-    from-scratch and Mammo-CLIP-based models sometimes fixate on the
-    corner marker text instead of breast tissue -- a shortcut-learning
-    artifact from feeding the model the FULL uncropped image, marker
-    included."""
+    Without this, a model can fixate on that corner marker text as a
+    shortcut instead of learning from breast tissue."""
     arr_min, arr_max = arr.min(), arr.max()
     arr_255 = (arr - arr_min) / max(arr_max - arr_min, 1e-6) * 255.0
     row_idx, col_idx = _breast_region_indices(arr_255)
@@ -104,10 +87,9 @@ def _letterbox_pad(arr: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
     target_w/target_h -- WITHOUT stretching/distorting content. Needed
     because crop_breast_region's output aspect ratio varies per patient
     (breast shape/positioning differs), unlike the uncropped DICOM's
-    consistent ~0.77-0.81 ratio -- a plain resize straight to a fixed
-    target size after cropping would apply a different, unpredictable
-    stretch factor to every patient (confirmed: cropped ratios ranged
-    0.37-0.66 across a 6-patient sample, vs. ~0.77-0.81 uncropped)."""
+    fairly consistent ratio -- a plain resize straight to a fixed target
+    size after cropping would apply a different, unpredictable stretch
+    factor to every patient."""
     h, w = arr.shape
     target_ratio = target_w / target_h
     cur_ratio = w / h
@@ -137,16 +119,13 @@ def load_mammo_view(path: str, size: int | tuple[int, int] = IMG_SIZE,
     imaged, which is a spurious cue the encoder would otherwise have to
     learn to ignore.
 
-    crop_breast=True (default, added 2026-08-21): auto-crops to the breast
-    silhouette BEFORE resizing, discarding black background and any
-    burned-in laterality/view marker text with it -- see crop_breast_region.
-    The crop's aspect ratio varies per patient (unlike the raw DICOM's
-    consistent ~0.77-0.81), so a zero-padded letterbox step restores a
-    fixed aspect ratio before the final resize -- without it, every
-    patient would get a different, unpredictable stretch distortion (a
-    real bug caught after the crop fix landed, not a hypothetical).
-    Only set False to reproduce old (pre-crop) cached results/checkpoints
-    for a controlled before/after comparison.
+    crop_breast=True (default): auto-crops to the breast silhouette BEFORE
+    resizing, discarding black background and any burned-in laterality/view
+    marker text with it -- see crop_breast_region. The crop's aspect ratio
+    varies per patient (unlike the raw DICOM's fairly consistent ratio), so
+    a zero-padded letterbox step restores a fixed aspect ratio before the
+    final resize -- without it, every patient gets a different,
+    unpredictable stretch distortion.
 
     letterbox=True (default): pads to the target aspect ratio before
     resizing (see _letterbox_pad) -- correct for every model WE train

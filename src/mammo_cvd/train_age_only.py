@@ -1,16 +1,7 @@
 """
-Age-only baseline: a plain (unweighted) LogisticRegression(age_at_baseline),
-generalized to run on any cohort_csv/splits_csv -- 2026-09-03, needed
-because the original age-only baseline (test_predictions_age_only.csv) was
-never a proper standalone script; it was reconstructed this session
-(verified to reproduce it almost exactly: e.g. empi=1000077043 -> 0.0295
-reconstructed vs 0.02954 on-file) to score one patient outside the test
-set. Now formalized so it can run on the 4 new expanded/symmetric-landmark
-cohorts too, matching the user's point that age-only (and tabular-only)
-need to be recomputed per-experiment, not just the image arms.
-
+Age-only baseline: a plain (unweighted) LogisticRegression(age_at_baseline).
 Deterministic (closed-form sklearn fit, no training-seed randomness) --
-run once per cohort, not 10 seeds like the neural-net arms.
+run once per cohort, not multiple seeds like the neural-net arms.
 
 Output: outputs/mammo_cvd/test_predictions_age_only_{run_tag}.csv
 """

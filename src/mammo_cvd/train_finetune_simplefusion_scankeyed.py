@@ -1,21 +1,12 @@
 """
-Generalized simplefusion trainer for the 2026-09-03 expanded/symmetric-
-landmark cohort experiments (3, 4, 5a, 5b) -- same architecture as
-train_finetune_mammoclip_simplefusion.py / train_finetune_mammofm_simplefusion.py
-(frozen backbone + mean-pool + small MLP head), but:
+Trains the image-arm risk head (frozen Mammo-CLIP or Mammo-FM backbone +
+mean-pool over L_MLO/R_MLO + small MLP head) on precomputed embeddings.
+--backbone selects which encoder's embeddings to use at runtime.
 
-1. --backbone selects mammoclip/mammofm at runtime instead of being a
-   separate hardcoded script.
-2. The embedding dataset is keyed by SCAN IDENTITY (empi, study_date,
-   view), reading from *_embeddings_scankeyed/ (built by
-   extract_embeddings_scankeyed.py), not the old empi-only cache --
-   required because these cohorts can select a different physical
-   baseline scan for the same patient across variants (confirmed 11,879/
-   18,017 patients differ between the plain-expanded and symmetric-
-   landmark cohorts), so an empi-only key would silently mix scans
-   across experiments.
-
-MLO-only (L_MLO/R_MLO), matching this experiment set's scope.
+The embedding cache is keyed by scan identity (empi, study_date, view) --
+see extract_embeddings_scankeyed.py -- so a patient with multiple scans
+across cohort variants always trains on the correct one, not whichever was
+cached first under an empi-only key.
 """
 from __future__ import annotations
 
@@ -30,25 +21,18 @@ import torch.nn as nn
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, Dataset
 
-from src.mammo_cvd.dataset import STANDARD_VIEWS
-
 PROJECT_ROOT = Path(os.environ.get("MAMMOCVD_ROOT", "."))  # set to your repo checkout root
 OUT_DIR = PROJECT_ROOT / "outputs" / "mammo_cvd"
 
 MLO_VIEWS = ["L_MLO", "R_MLO"]
-VIEW_TO_IDX = {v: i for i, v in enumerate(STANDARD_VIEWS)}
 
 
 class ScanKeyedEmbedDataset(Dataset):
-    """2026-09-04 perf fix: __getitem__ used to re-open both view .npy
-    files from disk on every sample access, every epoch -- for a frozen-
-    embedding probe head this tiny (a few thousand params) that made the
-    dataset almost entirely I/O-bound (observed ~51s/epoch, worse under
-    concurrent extraction jobs competing for the same scratch filesystem),
-    when the actual compute per epoch is milliseconds. A cohort's full set
-    of embeddings easily fits in RAM (~2048 floats x 2 views x ~22k
-    patients =~ 360MB), so load everything once at init and serve from an
-    in-memory dict instead."""
+    """Loads every (empi, study_date, view) embedding .npy for this split
+    into an in-memory dict once at init, rather than re-reading from disk
+    on every __getitem__ call -- a cohort's full embedding set easily fits
+    in RAM, and the head being trained is tiny, so I/O would otherwise
+    dominate epoch time."""
     def __init__(self, split: str, cohort_csv: str, splits_csv: str, embed_dir: Path, embed_dim: int):
         cohort = pd.read_csv(cohort_csv, dtype={"empi": str})
         cohort["study_date"] = pd.to_datetime(cohort["study_date"]).dt.strftime("%Y%m%d")
@@ -131,16 +115,13 @@ def main():
     ap.add_argument("--patience", type=int, default=8)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0,
-                     help="for multi-seed variance estimates -- seed 0 keeps the original, "
-                          "un-suffixed checkpoint/prediction filenames exactly as before; "
-                          "seed!=0 appends _seedN so repeat runs don't collide")
+                     help="for multi-seed variance estimates -- seed!=0 appends _seedN to "
+                          "checkpoint/prediction filenames so repeat runs don't collide")
     ap.add_argument("--backbone", choices=["mammoclip", "mammofm"], required=True)
     ap.add_argument("--cohort_csv", type=str, required=True)
     ap.add_argument("--splits_csv", type=str, required=True)
     ap.add_argument("--run_tag", type=str, required=True,
-                     help="distinguishes checkpoint/predictions filenames across the different "
-                          "cohort experiments (3/4/5a/5b) -- required, not optional, since there "
-                          "is no single 'default' cohort here")
+                     help="tag distinguishing this run's checkpoint/predictions filenames")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
