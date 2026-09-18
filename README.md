@@ -1,6 +1,10 @@
 # Mammography Foundation Models for Opportunistic Prediction of Major Adverse Cardiovascular Events
 
 <p align="center">
+  <a href="https://arxiv.org/pdf/2609.19385"><img src="https://img.shields.io/badge/arXiv-2609.19385-b31b1b.svg?logo=arxiv&logoColor=white" alt="arXiv"></a>
+</p>
+
+<p align="center">
   <img src="docs/fig1_method.png" alt="Method: frozen mammography foundation model encodes L-MLO/R-MLO views, embeddings are pooled into an exam representation, and an MLP head predicts 5-year MACE risk; Grad-CAM shown per view." width="720">
 </p>
 
@@ -78,6 +82,7 @@ Pipeline, given a cohort CSV: `extract_embeddings_scankeyed.py` →
   author  = {Feldman, Paula and Nizam, Nusrat Binta and Kwak, Sunwoo and Karaman, Batuhan and Dodelzon, Katerina and Sabuncu, Mert},
   journal = {arXiv preprint},
   year    = {2026},
-  note    = {arXiv:TBD}
+  eprint  = {2609.19385},
+  archivePrefix = {arXiv}
 }
 ```
